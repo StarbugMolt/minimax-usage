@@ -5,23 +5,40 @@ description: Check MiniMax API usage/credits remaining. Use when you need to kno
 
 # MiniMax Usage Check
 
-This skill checks the remaining credits on your MiniMax account.
+This skill checks the remaining credits on the MiniMax account.
 
 ## API Key
 
-The API key is stored in `/home/starbugmolt/.openclaw/agents/main/agent/auth-profiles.json` under `profiles.minimax:default.key`.
+**Preferred:** the key is already exported as `MINIMAX_API_KEY` in the shell environment
+(verified 2026-11-06). Read it from the env and use it as a bearer token.
+
+**Fallback:** if the env var is empty, the key lives in the auth store. The old JSON path
+`~/.openclaw/agents/main/agent/auth-profiles.json` **no longer exists** — auth moved into SQLite
+(`~/.openclaw/agents/starbugmolt/agent/openclaw-agent.sqlite`). A legacy JSON export is kept at
+`~/.openclaw/agents/starbugmolt/agent/auth-profiles.json.sqlite-import.1783279774142.bak`
+(`profiles["minimax:default"].key`). Never print the key value; only use it as a bearer token.
+
+Confirm which one is live with:
+
+```bash
+openclaw models status | grep -A1 '^.*minimax '   # shows the effective profile and its source
+```
 
 ## Checking Usage
 
-Make a curl request to the MiniMax API:
+Run this script — it reads the key from the environment and prints the raw quota JSON:
 
 ```bash
-curl --location 'https://platform.minimax.io/v1/api/openplatform/coding_plan/remains' \
-  --header 'Authorization: Bearer <API_KEY>' \
-  --header 'Content-Type: application/json'
+python3 - <<'PY'
+import json, os, urllib.request
+key = os.environ.get("MINIMAX_API_KEY", "")
+req = urllib.request.Request(
+    "https://platform.minimax.io/v1/api/openplatform/coding_plan/remains",
+    headers={"Authorization": "Bearer " + key, "Content-Type": "application/json"},
+)
+print(json.dumps(json.load(urllib.request.urlopen(req, timeout=30)), indent=2))
+PY
 ```
-
-Replace `<API_KEY>` with the actual API key from the auth-profiles.json file.
 
 ## Response
 
@@ -29,25 +46,26 @@ The API returns JSON with two types of remaining quota:
 
 ### Response Fields
 
-- `remains_time` - Remaining compute time in **milliseconds**
-- `current_interval_total_count` - Display denominator (not used)
-- `current_interval_usage_count` - Requests remaining in current period
+- `remains_time` - Milliseconds remaining until this interval resets. NOT compute time. Divide by 1000/60 to get minutes left.
+- `current_interval_total_count` - Total quota for this interval
+- `current_interval_usage_count` - **Remaining requests left** in this interval (MiniMax named this confusingly — it IS remaining, NOT used)
+- `current_weekly_total_count` / `current_weekly_usage_count` - Same fields for weekly pool (may differ from dashboard)
+- `current_interval_remaining_percent` / `current_weekly_remaining_percent` - Direct percentage remaining (the simplest signal)
 - `start_time` / `end_time` - Period timestamps (epoch ms)
-- `model_name` - Model name (may show "MiniMax-M2" even when using M2.5)
 
-### Example
+### How to Calculate
 
-```json
-{
-  "model_remains": [{
-    "remains_time": 14731640,
-    "current_interval_total_count": 1500,
-    "current_interval_usage_count": 1429,
-    "model_name": "MiniMax-M2"
-  }]
-}
+```python
+total = data["current_interval_total_count"]
+remaining = data["current_interval_usage_count"]   # ← this IS remaining (counterintuitive!)
+used = total - remaining
+minutes_left = data["remains_time"] / 1000 / 60
 ```
 
-Present the usage as:
-- **Compute time remaining**: `remains_time / 1000 / 60` = minutes left
-- **Requests remaining**: `current_interval_total_count - current_interval_usage_count`
+### Reading It (verified 2026-11-06)
+
+`model_remains` is a **list** (one entry per model, e.g. `general`, `video`). The easiest signal is
+`current_interval_remaining_percent` and `current_weekly_remaining_percent` — on 2026-11-06 the
+`general` entry reported 92% interval / 100% weekly, i.e. the account was not out of credits even
+while the API was returning `429 overloaded_error`. **A 429 from MiniMax means "server busy", not
+"quota exhausted"** — check these percentages before blaming quota.
